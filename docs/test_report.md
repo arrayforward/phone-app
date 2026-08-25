@@ -78,11 +78,38 @@ oneVPL 解码 → 还原 RGB → Pillow `ImageChops.difference` + `ImageStat.rms
 ![基准](images/cmp_ref_text.png)
 基准（ref，文字区域放大）
 
-![single 4:2:0](images/cmp_single_text.png)
-single 4:2:0 @6M：彩边渗色/发灰
+**single（4:2:0）逐档**：
 
-![dual-ycocg](images/cmp_ycocg_text.png)
-dual-ycocg @6M：彩边贴原图
+![single_6M](images/cmp_single_6M_text.png)
+single @6M（30.90dB / 91KB）
+
+![single_12M](images/cmp_single_12M_text.png)
+single @12M（36.44dB / 271KB）
+
+![single_40M](images/cmp_single_40M_text.png)
+single @40M（38.57dB / 478KB）：彩边渗色始终存在（色度天花板）
+
+**dual-raw（§3.1）逐档**：
+
+![dual_6M](images/cmp_dual_6M_text.png)
+dual-raw @6M（31.05dB / 221KB）
+
+![dual_12M](images/cmp_dual_12M_text.png)
+dual-raw @12M（33.90dB / 335KB）
+
+**dual-ycocg（§3.2）逐档**：
+
+![dual_ycocg_6M](images/cmp_dual_ycocg_6M_text.png)
+dual-ycocg @6M（29.58dB / 84KB）：彩边已贴原图，字节仅 single 的 92%
+
+![dual_ycocg_12M](images/cmp_dual_ycocg_12M_text.png)
+dual-ycocg @12M（32.64dB / 143KB）
+
+![dual_ycocg_20M](images/cmp_dual_ycocg_20M_text.png)
+dual-ycocg @20M（36.65dB / 274KB）：与 single@12M 同字节、反超 0.21dB
+
+![dual_ycocg_40M](images/cmp_dual_ycocg_40M_text.png)
+dual-ycocg @40M（44.98dB / 794KB）：45dB 级近透明，三通道均衡
 
 ## 4. 稳定性实测
 
