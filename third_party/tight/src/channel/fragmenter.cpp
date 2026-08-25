@@ -13,12 +13,7 @@
 #include <cstring>
 #include <vector>
 
-#include <cstdio>
-#ifdef TIGHT_DBG_PACKET_LOG
-#define TIGHT_DBG_PRINTF(...) std::printf(__VA_ARGS__)
-#else
-#define TIGHT_DBG_PRINTF(...) ((void)0)
-#endif
+#include "util/dbg_log.hpp"
 
 namespace tight::tight_detail {
 
@@ -148,7 +143,6 @@ void Fragmenter::fragment_and_send(Peer& peer, Bytes payload, std::size_t mtu,
                         (unsigned long long)tight::unix_millis(),
                         (unsigned)channel, total, data_count, (unsigned)parity_count,
                         (unsigned)peer.m_fec_stage, (int)peer.m_fec_disable.load());
-            fflush(stdout);
         }
     }
     // 通道固定冗余 + 探测冗余：两者都叠加在自适应冗余之上，总校验片

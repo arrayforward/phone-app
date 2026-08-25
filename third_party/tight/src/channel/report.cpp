@@ -11,12 +11,7 @@
 #include <set>
 #include <vector>
 
-#include <cstdio>
-#ifdef TIGHT_DBG_PACKET_LOG
-#define TIGHT_DBG_PRINTF(...) std::printf(__VA_ARGS__)
-#else
-#define TIGHT_DBG_PRINTF(...) ((void)0)
-#endif
+#include "util/dbg_log.hpp"
 
 namespace tight::tight_detail {
 
@@ -72,14 +67,14 @@ Bytes Report::build_payload(Peer& peer, std::chrono::milliseconds report_interva
             if (cit != peer.m_missing_channel.end()) gch = cit->second;
             bool reliable = (gch < 8) && peer.m_channel_reliable[gch] && peer.m_peer_retransmit;
             if (!reliable) {
-                TIGHT_DBG_PRINTF("PROBE nack-skip-unreliable seq=%u ch=%u\n", mit->first, (unsigned)gch); fflush(stdout);
+                TIGHT_DBG_PRINTF("PROBE nack-skip-unreliable seq=%u ch=%u\n", mit->first, (unsigned)gch);
                 skip_gap(mit->first);
                 if (cit != peer.m_missing_channel.end()) peer.m_missing_channel.erase(cit);
                 mit = peer.m_missing_seqs.erase(mit);
                 continue;
             }
             if (elapsed_us > give_up_us) {
-                TIGHT_DBG_PRINTF("PROBE nack-giveup seq=%u\n", mit->first); fflush(stdout);
+                TIGHT_DBG_PRINTF("PROBE nack-giveup seq=%u\n", mit->first);
                 // 对端长期未重传（Report 全丢或对端已放弃）：停止上报。
                 // 缺口已在越限时跳过，ack 游标不受影响。
                 if (cit != peer.m_missing_channel.end()) peer.m_missing_channel.erase(cit);
@@ -91,7 +86,7 @@ Bytes Report::build_payload(Peer& peer, std::chrono::milliseconds report_interva
                 // Reassembler 从 m_missing_seqs 移除，自然停止。
                 lost_seqs.push_back(mit->first);
                 ++lost_this_interval;
-                TIGHT_DBG_PRINTF("PROBE nack-report seq=%u\n", mit->first); fflush(stdout);
+                TIGHT_DBG_PRINTF("PROBE nack-report seq=%u\n", mit->first);
                 // 超过 3.5×RTT 即跳过缺口：ack 游标不停滞，发送端可正常
                 // 修剪已确认 pending；迟到的重传仍会被正常投递。
                 skip_gap(mit->first);
@@ -408,7 +403,7 @@ ReportResult Report::handle(Peer& peer, const Bytes& payload, const ResendCallba
     std::map<std::uint32_t, PendingSend> snapshot;
     std::size_t no_pending = 0;
     for (auto ls : lost_seqs) {
-        TIGHT_DBG_PRINTF("PROBE nack-handle ack=%u lost=%u\n", ack_seq, ls); fflush(stdout);
+        TIGHT_DBG_PRINTF("PROBE nack-handle ack=%u lost=%u\n", ack_seq, ls);
         (void)ls;
     }
     {
@@ -424,7 +419,7 @@ ReportResult Report::handle(Peer& peer, const Bytes& payload, const ResendCallba
         for (auto& ls : lost_seqs) {
             if (!peer.m_pending.count(ls)) {
                 ++no_pending;
-                TIGHT_DBG_PRINTF("PROBE nack-lost-no-pending seq=%u\n", ls); fflush(stdout);
+                TIGHT_DBG_PRINTF("PROBE nack-lost-no-pending seq=%u\n", ls);
             }
         }
         for (auto it = peer.m_pending.begin(); it != peer.m_pending.end();) {

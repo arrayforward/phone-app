@@ -35,12 +35,7 @@
 #include <utility>
 #include <vector>
 
-#include <cstdio>
-#ifdef TIGHT_DBG_PACKET_LOG
-#define TIGHT_DBG_PRINTF(...) std::printf(__VA_ARGS__)
-#else
-#define TIGHT_DBG_PRINTF(...) ((void)0)
-#endif
+#include "util/dbg_log.hpp"
 
 namespace tight {
 
@@ -1527,7 +1522,7 @@ public:
     }
 
     void handle_report(Peer* peer, const PacketHeader& header, const Bytes& payload) {
-        TIGHT_DBG_PRINTF("PROBE report-recv peer=%s size=%zu\n", peer->m_id.c_str(), payload.size()); fflush(stdout);
+        TIGHT_DBG_PRINTF("PROBE report-recv peer=%s size=%zu\n", peer->m_id.c_str(), payload.size());
         // RTT sample from the report's one-way transit (clock-offset based).
         feed_rtt_from_tick(peer, header.tick);
         ReportResult r = Report::handle(*peer, payload,
@@ -1537,7 +1532,7 @@ public:
                            // 锛堢ǔ锟?~4%锛夛紝鐩村彂涓嶇牬鍧忛摼璺檺閫熺殑璇箟锟?
                            if (!p->m_addr_set || !socket_ready()) return;
                            PooledBytes datagram = build_wire_packet(p, h, pl);
-                           TIGHT_DBG_PRINTF("PROBE resend seq=%u type=%d\n", (unsigned)h.sequence, (int)h.type); fflush(stdout);
+                           TIGHT_DBG_PRINTF("PROBE resend seq=%u type=%d\n", (unsigned)h.sequence, (int)h.type);
                            socket_send(p->m_addr, datagram.data(), datagram.size());
                        });
         {
@@ -2412,10 +2407,8 @@ public:
                 fragment_and_send(task->m_peer, std::move(task->m_payload), task->m_channel, task->m_keyframe);
             } catch (const std::exception& e) {
                 TIGHT_DBG_PRINTF("DBG encode-exc: %s\n", e.what());
-                fflush(stdout);
             } catch (...) {
                 TIGHT_DBG_PRINTF("DBG encode-exc: unknown\n");
-                fflush(stdout);
             }
         }
         while (true) {

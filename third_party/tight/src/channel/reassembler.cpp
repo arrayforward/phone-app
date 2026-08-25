@@ -12,12 +12,7 @@
 #include <cstring>
 #include <vector>
 
-#include <cstdio>
-#ifdef TIGHT_DBG_PACKET_LOG
-#define TIGHT_DBG_PRINTF(...) std::printf(__VA_ARGS__)
-#else
-#define TIGHT_DBG_PRINTF(...) ((void)0)
-#endif
+#include "util/dbg_log.hpp"
 
 namespace tight::tight_detail {
 
@@ -57,7 +52,6 @@ void Reassembler::handle_data(Peer& peer, const PacketHeader& header,
                         (unsigned)header.message_id, (unsigned)header.fragment_index,
                         (unsigned)header.fragment_count,
                         (unsigned)channel_of(header.reserved), (unsigned)seq);
-            fflush(stdout);
         }
     }
 
@@ -125,7 +119,7 @@ void Reassembler::handle_data(Peer& peer, const PacketHeader& header,
             if (mit != peer.m_missing_seqs.end()) {
                 peer.m_missing_seqs.erase(mit);
                 peer.m_missing_channel.erase(seq);
-                TIGHT_DBG_PRINTF("PROBE gap-filled seq=%u\n", (unsigned)seq); fflush(stdout);
+                TIGHT_DBG_PRINTF("PROBE gap-filled seq=%u\n", (unsigned)seq);
             }
             // 乱序/重传分片（seq < next_expected）到达：从缺失表移除后
             // 还要插入 recv_seqs 并推进游标——若它正是当前游标缺口，不
@@ -326,7 +320,6 @@ bool Reassembler::try_assemble(Peer& peer, IncomingMessage& in,
             TIGHT_DBG_PRINTF("DBG fec-fail: data=%zu have=%zu multi=%zu parity=%zu total=%u ch=%u\n",
                         data_count, have, multi, parity_count, (unsigned)in.m_total_count,
                         (unsigned)in.m_channel);
-            fflush(stdout);
         }
         if (on_message_loss) on_message_loss(&peer, in.m_channel);
         return true;   // 终结该消息（调用方写入 m_completed 并清掉条目）

@@ -69,12 +69,15 @@ public final class PsnrTest {
         int rc = 0;
         rc |= encodeOne(singleI420, W, H, 6_000_000, new File(dir, "single_6M.h264"));
         rc |= encodeOne(singleI420, W, H, 12_000_000, new File(dir, "single_12M.h264"));
+        rc |= encodeOne(singleI420, W, H, 40_000_000, new File(dir, "single_40M.h264"));
         rc |= encodeOne(dualI420, W * 2, H, 6_000_000, new File(dir, "dual_6M.h264"));
         rc |= encodeOne(dualI420, W * 2, H, 9_000_000, new File(dir, "dual_9M.h264"));
         rc |= encodeOne(dualI420, W * 2, H, 12_000_000, new File(dir, "dual_12M.h264"));
         rc |= encodeOne(dualYcocg, W * 2, H, 6_000_000, new File(dir, "dual_ycocg_6M.h264"));
         rc |= encodeOne(dualYcocg, W * 2, H, 9_000_000, new File(dir, "dual_ycocg_9M.h264"));
         rc |= encodeOne(dualYcocg, W * 2, H, 12_000_000, new File(dir, "dual_ycocg_12M.h264"));
+        rc |= encodeOne(dualYcocg, W * 2, H, 20_000_000, new File(dir, "dual_ycocg_20M.h264"));
+        rc |= encodeOne(dualYcocg, W * 2, H, 40_000_000, new File(dir, "dual_ycocg_40M.h264"));
         System.out.println("[PsnrTest] " + (rc == 0 ? "ALL DONE" : "FAILED rc=" + rc));
         return rc;
     }
