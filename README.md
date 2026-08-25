@@ -5,6 +5,14 @@
 传输层完全基于本仓库的 `third_party/tight` 可靠 UDP 协议库（加密、FEC、ARQ、
 拥塞控制、命令插队通道），链路走 USB RNDIS 点对点（~2ms RTT），低时延。
 
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [docs/ycocg_pipeline.md](docs/ycocg_pipeline.md) | **YCoCg 双 YUV420 打包管线设计**（4:4:4 over 4:2:0，配图） |
+| [docs/test_report.md](docs/test_report.md) | **测试报告**（PSNR 对比 / 稳定性 / 延迟实测） |
+| [docs/protocol.md](docs/protocol.md) | 两端线上协议规范（消息格式/通道/tight 配置） |
+
 ## 组成
 
 ```
