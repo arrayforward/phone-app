@@ -68,12 +68,21 @@ public final class PsnrTest {
 
         int rc = 0;
         rc |= encodeOne(singleI420, W, H, 6_000_000, new File(dir, "single_6M.h264"));
+        rc |= encodeOne(singleI420, W, H, 3_000_000, new File(dir, "single_3M.h264"));
+        rc |= encodeOne(singleI420, W, H, 2_000_000, new File(dir, "single_2M.h264"));
+        rc |= encodeOne(singleI420, W, H, 4_000_000, new File(dir, "single_4M.h264"));
+        rc |= encodeOne(singleI420, W, H, 5_000_000, new File(dir, "single_5M.h264"));
         rc |= encodeOne(singleI420, W, H, 12_000_000, new File(dir, "single_12M.h264"));
         rc |= encodeOne(singleI420, W, H, 40_000_000, new File(dir, "single_40M.h264"));
         rc |= encodeOne(dualI420, W * 2, H, 6_000_000, new File(dir, "dual_6M.h264"));
         rc |= encodeOne(dualI420, W * 2, H, 9_000_000, new File(dir, "dual_9M.h264"));
         rc |= encodeOne(dualI420, W * 2, H, 12_000_000, new File(dir, "dual_12M.h264"));
         rc |= encodeOne(dualYcocg, W * 2, H, 6_000_000, new File(dir, "dual_ycocg_6M.h264"));
+        rc |= encodeOne(dualYcocg, W * 2, H, 5_000_000, new File(dir, "dual_ycocg_5M.h264"));
+        rc |= encodeOne(dualYcocg, W * 2, H, 4_000_000, new File(dir, "dual_ycocg_4M.h264"));
+        rc |= encodeOne(dualYcocg, W * 2, H, 2_000_000, new File(dir, "dual_ycocg_2M.h264"));
+        rc |= encodeOne(dualYcocg, W * 2, H, 1_500_000, new File(dir, "dual_ycocg_1_5M.h264"));
+        rc |= encodeOne(dualYcocg, W * 2, H, 2_500_000, new File(dir, "dual_ycocg_2_5M.h264"));
         rc |= encodeOne(dualYcocg, W * 2, H, 9_000_000, new File(dir, "dual_ycocg_9M.h264"));
         rc |= encodeOne(dualYcocg, W * 2, H, 12_000_000, new File(dir, "dual_ycocg_12M.h264"));
         rc |= encodeOne(dualYcocg, W * 2, H, 20_000_000, new File(dir, "dual_ycocg_20M.h264"));

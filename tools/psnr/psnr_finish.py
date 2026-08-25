@@ -76,9 +76,9 @@ def main():
     ref = Image.open(os.path.join(OUT, "ref.png")).convert("RGB")
     rows = []
     # kind: single=BT.601 4:2 0；raw=§3.1 双 YUV 原样搬运；ycocg=§3.2 YCoCg 打包
-    paths = [("single_6M", "single"), ("single_12M", "single"), ("single_40M", "single")] + \
+    paths = [(f"single_{b}M", "single") for b in (2, 3, 4, 5, 6, 12, 40)] + \
             [(f"dual_{b}M", "raw") for b in (6, 9, 12)] + \
-            [(f"dual_ycocg_{b}M", "ycocg") for b in (6, 9, 12, 20, 40)]
+            [(f"dual_ycocg_{b}M", "ycocg") for b in ("1_5", "2", "2_5", 4, 5, 6, 9, 12, 20, 40)]
     for tag, kind in paths:
         nv12 = os.path.join(OUT, f"{tag}.nv12")
         if kind == "single":
