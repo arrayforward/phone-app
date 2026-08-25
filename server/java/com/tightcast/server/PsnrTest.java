@@ -68,6 +68,7 @@ public final class PsnrTest {
 
         int rc = 0;
         rc |= encodeOne(singleI420, W, H, 6_000_000, new File(dir, "single_6M.h264"));
+        rc |= encodeOne(singleI420, W, H, 12_000_000, new File(dir, "single_12M.h264"));
         rc |= encodeOne(dualI420, W * 2, H, 6_000_000, new File(dir, "dual_6M.h264"));
         rc |= encodeOne(dualI420, W * 2, H, 9_000_000, new File(dir, "dual_9M.h264"));
         rc |= encodeOne(dualI420, W * 2, H, 12_000_000, new File(dir, "dual_12M.h264"));
