@@ -1,0 +1,21 @@
+# 构建产物
+build/
+server/out/
+tools/psnr/out/
+# tight 库自身构建/调试产物
+third_party/tight/build/
+third_party/tight/.tmp_repro/
+# 工具本地编译产物
+tools/psnr/*.exe
+
+# 嵌套仓库的本地历史备份（不入库）
+**/.git.bak/
+
+# 编译中间产物
+*.o
+
+# libvpl 只 vendor 头文件（运行时 dlopen libvpl.dll，驱动自带）
+third_party/libvpl/*
+!third_party/libvpl/api/
+!third_party/libvpl/LICENSE
+!third_party/libvpl/README.md
