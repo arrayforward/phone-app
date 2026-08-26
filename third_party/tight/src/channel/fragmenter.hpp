@@ -28,12 +28,15 @@ public:
     // （写入数据报 flags），channel_fec_extra 为该通道叠加在 late_ratio
     // 自适应校验片之上的固定冗余；probe_extra_parity 为带宽探测额外追加
     // 的校验片数（真实冗余，用于无 L4S 时的 2× 探测）。
+    // channel_fec_on=false 时该通道一律不生成校验片（起始保护/自适应/
+    // 通道额外/探测全部归零）——"丢了就丢"的流量（如分层视频残差层）。
     static void fragment_and_send(Peer& peer, Bytes payload, std::size_t mtu,
                                   const SendFragmentCallback& send_fragment,
                                   std::uint8_t channel = 0,
                                   std::uint16_t channel_fec_extra = 0,
                                   std::uint16_t probe_extra_parity = 0,
-                                  bool keyframe = false);
+                                  bool keyframe = false,
+                                  bool channel_fec_on = true);
 
     // 分段 FEC：由超线比例 p（延迟 > P50+late_buffer_ms 的报文占比）驱动。
     //   stage 0：p < 0.3%（统计分辨率下限）→ 0 片（无长尾，不加 FEC）

@@ -1,9 +1,9 @@
 # tightcast — 基于 tight 的手机投屏与远程操控
 
-在 **root 手机**上运行 server，把屏幕实时投射到 Windows PC，并支持从 PC
-远程操控手机：触控、键盘输入、滚轮，以及 **PC 麦克风声音注入**到手机扬声器。
+在 **root 手机**上运行 server，把屏幕实时投射到 **Windows PC 或另一台 Android 手机**，
+并支持远程操控：触控、键盘输入、滚轮，以及 **客户端麦克风声音注入**到手机扬声器。
 传输层完全基于本仓库的 `third_party/tight` 可靠 UDP 协议库（加密、FEC、ARQ、
-拥塞控制、命令插队通道），链路走 USB RNDIS 点对点（~2ms RTT），低时延。
+拥塞控制、命令插队通道），链路走 USB RNDIS 点对点（~2ms RTT）或手机热点直连，低时延。
 
 ## 文档
 
@@ -11,7 +11,10 @@
 |---|---|
 | [docs/ycocg_pipeline.md](docs/ycocg_pipeline.md) | **YCoCg 双 YUV420 打包管线设计**（4:4:4 over 4:2:0，配图） |
 | [docs/test_report.md](docs/test_report.md) | **测试报告**（PSNR 对比 / 稳定性 / 延迟实测） |
-| [docs/protocol.md](docs/protocol.md) | 两端线上协议规范（消息格式/通道/tight 配置） |
+| [docs/protocol.md](docs/protocol.md) | 两端线上协议规范（消息格式/通道/tight 配置；含 §3.4 layer 分层） |
+| [docs/android_client_plan.md](docs/android_client_plan.md) | **Android 客户端 + 三模式（single/double/layer）方案**（已落地联调） |
+| [docs/layered_design.md](docs/layered_design.md) | **分层残差编解码与快速上屏机制详述**（闭环/双参考链/grace P50） |
+| [docs/layer_test_report.md](docs/layer_test_report.md) | **分层增强层选型实验**（差分伪装不可行 vs 直偏置硬编可行，配图） |
 
 ## 组成
 
@@ -19,15 +22,31 @@
 phone-app/
 ├── third_party/tight/   # 可靠 UDP 传输库（投屏/远控的传输层）
 ├── docs/protocol.md     # 两端共享协议规范（消息格式/通道/tight 配置）
+├── shared/layered/      # layer 模式共享模块（残差/Rice 熵编码/差分伪装，host 单测）
 ├── server/              # Android 端（root 手机，app_process 运行，无需 APK）
 │   ├── java/...         # 虚拟显示镜像采集 + MediaCodec H.264 + 输入注入 + AudioTrack
-│   ├── jni/             # tight 的 JNI 桥（NDK 编译 libtight_jni.so）
+│   │                    #   + layer 模式：BaseDecoder 闭环解码 + EnhEncoder 增强层
+│   ├── jni/             # tight 的 JNI 桥 + repack/残差 native（NDK libtight_jni.so）
 │   ├── build.sh         # 一键构建（javac + d8 + NDK cmake）
 │   ├── run.sh           # adb push + su app_process 前台启动
 │   └── usb-link.sh      # 配置 USB RNDIS 点对点链路（重启手机后需重跑）
-└── client/              # Windows PC 客户端（C++17，MinGW，零第三方依赖）
-    └── src/             # oneVPL（Intel 硬解）优先 + MF/D3D11 兜底 + Win32/OpenGL 渲染/输入 + waveIn 麦克风
+├── client/              # Windows PC 客户端（C++17，MinGW，零第三方依赖）
+│   └── src/             # oneVPL（Intel 硬解）优先 + MF/D3D11 兜底 + Win32/OpenGL 渲染/输入 + waveIn 麦克风
+└── client-android/      # Android 手机客户端（APK：Java 上层 + C++ 核心 JNI）
+    ├── app/             # Activity/GLSurfaceView/AudioRecord/VideoDec（Java MediaCodec 解码）
+    ├── jni/             # tight Leaf + 调度/配对合成/GLES2 shader（libtightcast_client.so）
+    ├── build.sh         # 脚本出 APK（javac + d8 + aapt2 + zipalign + apksigner，无 Gradle）
+    └── run.sh           # adb install + am start
 ```
+
+## 视频格式三模式（协议 §3，运行时经 SET_FORMAT 命令切换）
+
+| 模式 | mode 位域 | 说明 |
+|---|---|---|
+| double-ycocg（默认） | `0b010` | 双 YUV420 YCoCg 打包（4:4:4 over 4:2:0），画质上限 |
+| double-raw | `0b000` | 双 YUV420 RGB 原样搬运（对照） |
+| single | `0b001` | W×H BT.601 4:2:0 直接编码，编码像素减半 |
+| **layer** | `0b101` | **分层**：低码率 single 基础层（ch 0）+ 直偏置残差增强层（ch 4，第二个硬编）；两帧赶上上屏窗口即合成近无损画面，赶不上先上屏低码率帧 |
 
 ## 快速开始
 
@@ -51,7 +70,29 @@ cmake --build build -j
 RNDIS 网卡会自动获得 169.254.x.x 地址，无需管理员改 IP。同一可信 LAN 内
 也可以直接连手机 WiFi IP（注意很多 AP 阻断客户端间 UDP）。
 
-## 客户端用法
+### Android 手机客户端（第二台手机做显示端）
+
+```bash
+./client-android/build.sh
+./client-android/run.sh                 # 或 adb install -r client-android/out/tightcast-client.apk
+```
+
+- 界面输入 server IP/端口（手机热点拓扑下默认 `192.168.43.1:8800`），模式下拉
+  可切换 single/double/layer（需已连接）。
+- 触控 = 远程触控；物理按键直通注入（BACK 留给本机）；屏幕按钮发 返回/Home/最近。
+- 麦克风注入默认开启（RECORD_AUDIO 权限），状态栏显示上屏统计
+  （shown/composited/enh_idr + 双解码器状态）。
+- adb 自动化：`am start -n com.tightcast.client/.MainActivity --es host <ip>
+  --ei port 8800 --ez autoconnect true [--ei mode 5] [--ei enhWaitMs 150]`
+
+#### 真机验证拓扑（已实测）
+
+小米 10（root）开热点（`cmd wifi start-softap <ssid> wpa2 <pass>` 或设置里开），
+华为接入热点，客户端连 server 的热点 IP。layer 模式：
+`./server/run.sh --mode layer`（热点拓扑不需要 usb-link.sh）。
+注意：企业 WiFi 常见客户端隔离（ping 不通即为此情况），必须走热点或 USB RNDIS。
+
+## 客户端用法（Windows）
 
 ```
 tightcast-client <phone_ip> [--port 8800] [--token tightcast] [--no-audio]
@@ -68,7 +109,11 @@ tightcast-client <phone_ip> [--port 8800] [--token tightcast] [--no-audio]
 ## server 参数
 
 ```
---port 8800  --token tightcast  --bitrate 6000000  --fps 30  --max-size 1920  --no-audio
+--port 8800  --token tightcast  --bitrate 6000000  --fps 30  --max-size 1920
+--mode double-ycocg|double-raw|single|layer   # 视频格式模式（默认 double-ycocg）
+--base-share 0.35                             # layer 模式基础层码率占比
+--enh-impl h264|rice                          # layer 增强层实现（默认 h264 直偏置硬编）
+--no-audio  --gl-repack  --yuv-raw（=double-raw）
 ```
 
 ## 工作原理（要点）

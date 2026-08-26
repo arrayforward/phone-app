@@ -31,10 +31,15 @@ public final class Server {
         int maxSize = 1920;  // 1080p：长边 1920（如 1080x2340 屏 → 883x1920）
         boolean audio = true;
         boolean glRepack = false;
-        boolean ycocg = true;   // 协议 §3.2 YCoCg 打包（默认）；--yuv-raw 回退 §3.1
+        // 视频格式模式（协议 §5 命令 0x06 位域）：默认 double-ycocg
+        int formatMode = ScreenEncoder.MODE_COLOR_YCOCG;
+        double baseShare = 0.35;   // layer 模式基础层码率占比
+        int enhImpl = ScreenEncoder.ENH_H264;  // 增强层实现：H.264 直偏置硬编（默认）
         boolean selftest = false;
         String psnrRgba = null;   // --psnr-test <rgba_path> <out_dir>
         String psnrOutDir = null;
+        String layerRgba = null;  // --layer-test <rgba_path> <out_dir>（方案A 实验）
+        String layerOutDir = null;
         for (int i = 0; i < args.length; i++) {
             try {
                 switch (args[i]) {
@@ -60,7 +65,34 @@ public final class Server {
                         glRepack = true;
                         break;
                     case "--yuv-raw":
-                        ycocg = false;  // 回退协议 §3.1 的 RGB 原样搬运
+                        formatMode = 0;  // 回退协议 §3.1 的 RGB 原样搬运（double-raw）
+                        break;
+                    case "--mode":
+                        switch (args[++i]) {
+                            case "double-raw":
+                                formatMode = 0;
+                                break;
+                            case "double-ycocg":
+                                formatMode = ScreenEncoder.MODE_COLOR_YCOCG;
+                                break;
+                            case "single":
+                                formatMode = ScreenEncoder.MODE_GEOM_SINGLE;
+                                break;
+                            case "layer":
+                                formatMode = ScreenEncoder.MODE_GEOM_SINGLE
+                                        | ScreenEncoder.MODE_LAYERED;
+                                break;
+                            default:
+                                System.out.println("[Server] unknown --mode: " + args[i]);
+                                System.exit(1);
+                        }
+                        break;
+                    case "--base-share":
+                        baseShare = Double.parseDouble(args[++i]);
+                        break;
+                    case "--enh-impl":
+                        enhImpl = "rice".equals(args[++i])
+                                ? ScreenEncoder.ENH_RICE : ScreenEncoder.ENH_H264;
                         break;
                     case "--repack-selftest":
                         selftest = true;
@@ -68,6 +100,10 @@ public final class Server {
                     case "--psnr-test":
                         psnrRgba = args[++i];
                         psnrOutDir = args[++i];
+                        break;
+                    case "--layer-test":
+                        layerRgba = args[++i];
+                        layerOutDir = args[++i];
                         break;
                     default:
                         System.out.println("[Server] ignoring unknown arg: " + args[i]);
@@ -78,7 +114,8 @@ public final class Server {
             }
         }
         System.out.println("[Server] port=" + port + " bitrate=" + bitrate + " fps=" + fps
-                + " maxSize=" + maxSize + " audio=" + audio + " glRepack=" + glRepack);
+                + " maxSize=" + maxSize + " audio=" + audio + " glRepack=" + glRepack
+                + " mode=0x" + Integer.toHexString(formatMode) + " baseShare=" + baseShare);
 
         System.load("/data/local/tmp/tightcast/libtight_jni.so");
         System.out.println("[Server] libtight_jni loaded");
@@ -88,6 +125,11 @@ public final class Server {
             System.exit(PsnrTest.run(psnrRgba, psnrOutDir));
         }
 
+        // 方案A 实验：残差直偏置 vs 差分伪装硬件编码对比（编完退出）
+        if (layerRgba != null) {
+            System.exit(PsnrTest.runLayerTest(layerRgba, layerOutDir));
+        }
+
         // 重排自检：已知图案分别走 CPU / GL 两路径，逐字节比对后退出
         if (selftest) {
             boolean ok = GlRepack.selfTest(64, 48) && GlRepack.selfTest(886, 1920);
@@ -95,7 +137,8 @@ public final class Server {
             return;
         }
 
-        final ScreenEncoder encoder = new ScreenEncoder(bitrate, fps, maxSize, glRepack, ycocg);
+        final ScreenEncoder encoder = new ScreenEncoder(bitrate, fps, maxSize, glRepack,
+                formatMode, baseShare, enhImpl);
         final ControlInjector control = new ControlInjector(encoder);
         final AudioInjector audioInjector = audio ? new AudioInjector() : null;
 
@@ -119,6 +162,7 @@ public final class Server {
                 if (online) {
                     sendDeviceInfo(encoder);
                     encoder.requestKeyframe();
+                    encoder.requestEnhKeyframe();  // 增强链同样以 IDR 起链（ch4）
                 } else {
                     // 内核把 tight 的 UDP socket connect 到旧对端后，来自新客户端的
                     // 报文被 NoPorts 丢弃。进程内 nativeStop 重建会挂死（stop 需 join

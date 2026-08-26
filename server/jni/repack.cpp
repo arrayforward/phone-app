@@ -98,6 +98,22 @@ Java_com_tightcast_server_Repack_nativeRgbaToI420(
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_tightcast_server_Repack_nativeRepackSingleDirect(
+        JNIEnv* env, jclass /*cls*/, jobject rgba, jint w, jint h,
+        jint row_stride, jint pixel_stride, jobject dst) {
+    const std::uint8_t* src = direct_addr(env, rgba);
+    std::uint8_t* out = direct_addr(env, dst);
+    if (src == nullptr || out == nullptr) return;
+    // 容量防御（同 nativeRepackDirect）
+    jlong src_cap = env->GetDirectBufferCapacity(rgba);
+    jlong dst_cap = env->GetDirectBufferCapacity(dst);
+    int64_t src_need = (int64_t)row_stride * (h - 1) + (int64_t)w * pixel_stride;
+    int64_t dst_need = (int64_t)w * h * 3 / 2;
+    if (w <= 0 || h <= 0 || src_cap < src_need || dst_cap < dst_need) return;
+    repack::rgba_to_i420(src, w, h, row_stride, pixel_stride, out);
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_tightcast_server_Repack_nativeFillInputImage(
         JNIEnv* env, jclass /*cls*/, jobject src, jint enc_w, jint enc_h,
         jobject y_buf, jint y_row_stride, jint y_pixel_stride,

@@ -39,6 +39,17 @@ public final class Repack {
         }
     }
 
+    /** 单 YUV420 路径（协议 §3.3 single 几何）：ImageReader RGBA_8888 → BT.601 I420（W×H）。 */
+    public static void repackSingle(Image image, int w, int h, ByteBuffer dst) {
+        Image.Plane p = image.getPlanes()[0];
+        ByteBuffer buf = p.getBuffer();
+        dst.clear();
+        if (!buf.isDirect()) {
+            throw new IllegalStateException("single repack requires direct buffer");
+        }
+        nativeRepackSingleDirect(slice0(buf), w, h, p.getRowStride(), p.getPixelStride(), slice0(dst));
+    }
+
     /**
      * 把 2W×H I420（repack 输出）填入编码器输入 Image 的各平面，
      * 按各 plane 的 rowStride/pixelStride 拷贝，兼容 planar 三平面与 NV12 交错两平面。
@@ -85,6 +96,9 @@ public final class Repack {
             int rowStride, int pixelStride, ByteBuffer dst);
 
     private static native void nativeRgbaToI420(byte[] rgba, int offset, int w, int h,
+            int rowStride, int pixelStride, ByteBuffer dst);
+
+    private static native void nativeRepackSingleDirect(ByteBuffer rgba, int w, int h,
             int rowStride, int pixelStride, ByteBuffer dst);
 
     private static native void nativeFillInputImage(ByteBuffer src, int encW, int encH,

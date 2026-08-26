@@ -72,6 +72,12 @@ public final class ControlInjector {
                 case 0x05:
                     encoder.requestKeyframe();
                     break;
+                case 0x06:  // SET_FORMAT（协议 §5）：切换视频格式模式
+                    if (cmd.length >= 2) encoder.setFormat(cmd[1] & 0xFF);
+                    break;
+                case 0x07:  // REQ_ENH_KEYFRAME（协议 §3.4）：增强层断链恢复
+                    encoder.requestEnhKeyframe();
+                    break;
                 default:
                     System.out.println("[ControlInjector] unknown command 0x"
                             + Integer.toHexString(cmd[0] & 0xFF));

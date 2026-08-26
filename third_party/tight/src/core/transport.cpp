@@ -2430,6 +2430,9 @@ public:
         // 视频通道（通道 0），避免探测流量干扰音频的稳定传输。
         std::uint16_t chan_extra = (channel < 8) ? m_config.channel_fec_extra[channel] : 0;
         if (channel != 0) probe_extra = 0;
+        // 通道级 FEC 开关（channel_fec_enabled）：关闭的通道不生成校验片
+        const bool chan_fec_on = (channel < 8) ? m_config.channel_fec_enabled[channel]
+                                               : true;
         Fragmenter::fragment_and_send(*peer, std::move(payload), m_config.mtu,
                                       [this, channel](Peer* p, std::uint32_t msg_id,
                                              std::uint16_t idx, std::uint16_t cnt,
@@ -2440,7 +2443,8 @@ public:
                                                            real_size, frag_data, frag_len,
                                                            width, ackable, channel, keyframe);
                                       },
-                                      channel, chan_extra, probe_extra, keyframe);
+                                      channel, chan_extra, probe_extra, keyframe,
+                                      chan_fec_on);
     }
 
     void send_byes() {

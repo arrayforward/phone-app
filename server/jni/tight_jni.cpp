@@ -171,6 +171,9 @@ Java_com_tightcast_server_TightBridge_nativeStart(JNIEnv* env, jclass, jint port
     // 视频通道（0）不开 ARQ：重传会让丢分片的帧晚于后续帧重组完成、乱序送达
     // 解码器→花屏。视频纯 FEC 兜底 + 缺帧即 REQ_KEYFRAME（应用层恢复）。
     config.channel_reliable[3] = true;   // data 通道可靠
+    // 通道级 FEC：ch0 基础层保持开启（默认 true），ch4 增强层关闭——
+    // 残差帧丢包即弃（不上屏），校验片带宽让给基础层（protocol §3.4）
+    config.channel_fec_enabled[4] = false;
     // USB/RNDIS 高带宽链路：种子/上限提到 100Mbps。贷款保持默认 5s——
     // 实测突发本身不丢包（udpblast 2000 包零丢失，早先的突发丢包其实是
     // tight 每包 printf 拖慢接收线程所致，已宏化关闭）；loan=0 的严格匀速
@@ -264,6 +267,25 @@ Java_com_tightcast_server_TightBridge_nativeSendVideo(JNIEnv* env, jclass,
     bool ok = transport->send_video(peer, std::move(payload), keyframe == JNI_TRUE);
     (ok ? g_videoSendOk : g_videoSendFail).fetch_add(1);
     return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_tightcast_server_TightBridge_nativeSendChannel(JNIEnv* env, jclass,
+                                                        jbyteArray payloadArr, jint channel) {
+    // 锁序同 nativeSendVideo：g_mutex 只用于取快照（不持锁进 tight 内部锁）
+    tight::TightTransport* transport;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        transport = g_transport.get();
+        if (transport == nullptr) return JNI_FALSE;
+    }
+    std::string peer = current_peer_id(transport);
+    if (peer.empty()) return JNI_FALSE;
+    jsize len = env->GetArrayLength(payloadArr);
+    tight::Bytes payload(static_cast<std::size_t>(len));
+    env->GetByteArrayRegion(payloadArr, 0, len, reinterpret_cast<jbyte*>(payload.data()));
+    return transport->send_channel(peer, std::move(payload),
+                                   static_cast<std::uint8_t>(channel)) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL

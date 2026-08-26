@@ -28,6 +28,9 @@ public final class TightBridge {
     /** 发送视频消息（通道 0）给当前唯一在线 peer。 */
     public static native boolean nativeSendVideo(byte[] frame, boolean keyframe);
 
+    /** 发送到指定逻辑通道（layer 模式增强层 = 通道 4，协议 §3.4）。 */
+    public static native boolean nativeSendChannel(byte[] payload, int channel);
+
     /** 发送可靠数据消息（通道 3 data）。 */
     public static native boolean nativeSendData(byte[] payload);
 

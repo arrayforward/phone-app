@@ -154,6 +154,12 @@ struct TightConfig {
     // 校验片之上：音频帧小且关键，可单独提高冗余（如通道 1 设 1~2）。
     // 通道号同时写入数据报 reserved 字段高 4 位，接收端据此识别所属通道。
     std::uint16_t    channel_fec_extra[8]{};
+    // 每通道 FEC 开关（发送侧）：false = 该通道一律不生成校验片（起始保护/
+    // 自适应/通道额外全部归零）。适用"丢了就丢"的增强层类流量（分层视频的
+    // 残差层：丢包即弃不上屏，省校验片带宽）。接收侧无需配置（无校验片时
+    // 缺口自然走丢失通知）。默认全开。
+    bool             channel_fec_enabled[8] = {true, true, true, true,
+                                               true, true, true, true};
     // per-channel 可靠开关（NACK/ARQ 重传）：置位的通道消息参与按缺口
     // 重传（发送端保留 m_pending、接收端对缺口生成 NACK），未置位通道
     // （如实时视频，纯 FEC 兜底低延迟）缺口立即跳过不重传。两端需一致

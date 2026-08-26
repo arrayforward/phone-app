@@ -85,9 +85,9 @@ std::uint16_t Fragmenter::compute_parity_count_for(double late_ratio, std::size_
 void Fragmenter::fragment_and_send(Peer& peer, Bytes payload, std::size_t mtu,
                                    const SendFragmentCallback& send_fragment,
                                    std::uint8_t channel,
-                                   std::uint16_t channel_fec_extra,
-                                   std::uint16_t probe_extra_parity,
-                                   bool keyframe) {
+                                    std::uint16_t channel_fec_extra,
+                                    std::uint16_t probe_extra_parity,
+                                    bool keyframe, bool channel_fec_on) {
     std::size_t frag_payload = mtu > kHeaderSize ? mtu - kHeaderSize : 64;
     if (frag_payload <= 4) frag_payload = 64;
     std::uint32_t msg_id;
@@ -118,7 +118,12 @@ void Fragmenter::fragment_and_send(Peer& peer, Bytes payload, std::size_t mtu,
     // 少量阻塞时冗余恢复有用；大量阻塞时冗余本身挤占带宽加剧拥塞，
     // 让出带宽给数据（起始保护/自适应/通道额外/探测冗余全部归零）。
     std::uint16_t parity_count;
-    if (peer.m_fec_disable.load()) {
+    if (!channel_fec_on) {
+        // 通道级 FEC 关闭（channel_fec_enabled）：起始保护/自适应/额外全归零
+        parity_count = 0;
+        channel_fec_extra = 0;
+        probe_extra_parity = 0;
+    } else if (peer.m_fec_disable.load()) {
         parity_count = 0;
     } else if (!peer.m_have_late_report) {
         parity_count = 2;

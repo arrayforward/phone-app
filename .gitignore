@@ -1,12 +1,14 @@
 # 构建产物
 build/
 server/out/
+client-android/out/
 tools/psnr/out/
 # tight 库自身构建/调试产物
 third_party/tight/build/
 third_party/tight/.tmp_repro/
 # 工具本地编译产物
 tools/psnr/*.exe
+tools/psnr/__pycache__/
 
 # 嵌套仓库的本地历史备份（不入库）
 **/.git.bak/
@@ -19,3 +21,4 @@ third_party/libvpl/*
 !third_party/libvpl/api/
 !third_party/libvpl/LICENSE
 !third_party/libvpl/README.md
+client-android/debug.keystore

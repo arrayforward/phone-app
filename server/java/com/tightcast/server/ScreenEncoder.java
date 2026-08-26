@@ -42,12 +42,21 @@ public final class ScreenEncoder {
     private static final long ROTATION_CHECK_INTERVAL_MS = 1000;
     private static final int REPACK_STATS_INTERVAL = 100;
 
+    // 模式位域（协议 §5 命令 0x06 SET_FORMAT）
+    public static final int MODE_GEOM_SINGLE = 0x01;  // 0=double(2W×H) 1=single(W×H)
+    public static final int MODE_COLOR_YCOCG = 0x02;  // 仅 double：0=raw 1=YCoCg
+    public static final int MODE_LAYERED     = 0x04;  // 1=layer（ch0 基础层 + ch4 增强层）
+
     private final int bitrate;
     private final int fps;
     private final int maxSize;
     private final boolean glRepackEnabled;
-    // YCoCg 打包（协议 §3.2，默认开）：视频消息头 flags bit1 标记
-    private final boolean ycocgEnabled;
+    // 视频格式模式（协议 §3）：位域见 MODE_*，运行时可经 SET_FORMAT 切换
+    private volatile int formatMode;
+    // layer 模式基础层码率占比（capacity × baseShare，0..1）
+    private final double baseShare;
+    // SET_FORMAT 挂起请求（命令线程置位，编码线程消费后 recreate）
+    private volatile int pendingFormat = -1;
 
     private volatile boolean running;
     private Thread thread;
@@ -112,6 +121,36 @@ public final class ScreenEncoder {
     // 帧龄统计（编码线程写）：编码完成时刻 − SurfaceFlinger 合成时刻
     private long sendAgeMsTotal;
     private long sendAgeCount;
+    // layer 增强管线诊断计数（repack 统计行携带）
+    private long baseDecOut;   // BaseDecoder 重建帧输出数
+    private long enhComputed;  // 残差已算并喂入增强编码器数
+    private long enhSent;      // 增强消息实际发出数
+
+    // ---- layer 模式：基础层闭环解码 + 残差增强（协议 §3.4）----
+    private BaseDecoder baseDecoder;
+    // 增强层实现：0=H.264 直偏置 sym 硬编（默认，实验证明可行）、1=Rice 无损熵编码（对照）
+    public static final int ENH_H264 = 0;
+    public static final int ENH_RICE = 1;
+    private final int enhImpl;
+    private EnhEncoder enhEncoder;
+    // BaseDecoder 输入积压溢出 → 参考链断裂：抑制增强发送直到下一 IDR 喂入解码器
+    private volatile boolean enhResync;
+    // 最近一次 video_capacity（bps），增强层逐帧字节预算依据
+    private long lastCapacityBps;
+    // orig I420 帧环形缓存（tryFeed 时拷贝，增强工作线程按 pts 对齐取用）
+    private final Object origLock = new Object();
+    private final java.util.HashMap<Long, ByteBuffer> origByPts = new java.util.HashMap<>();
+    private final java.util.ArrayDeque<Long> origOrder = new java.util.ArrayDeque<>();
+    private final java.util.ArrayDeque<ByteBuffer> origFree = new java.util.ArrayDeque<>();
+    private static final int ORIG_RING = 4;
+    // recon 紧凑拷贝环形缓冲（解码回调线程拷入，增强工作线程消费后归还）
+    private final ArrayBlockingQueue<ByteBuffer> reconFree = new ArrayBlockingQueue<>(3);
+    private static final class EnhTask {
+        ByteBuffer recon;  // 紧凑 planar I420（reconFree 借出，用完归还）
+        long ptsUs;
+    }
+    private final ArrayBlockingQueue<EnhTask> enhQueue = new ArrayBlockingQueue<>(4);
+    private Thread enhThread;
 
     /** GL 重排的帧出口：与 CPU 路径共用 freeBufs / pending 槽。 */
     private final GlRepack.Sink glSink = new GlSink(this);
@@ -135,21 +174,32 @@ public final class ScreenEncoder {
     }
 
     public ScreenEncoder(int bitrate, int fps, int maxSize) {
-        this(bitrate, fps, maxSize, true);
+        this(bitrate, fps, maxSize, false, MODE_COLOR_YCOCG, 0.35, ENH_H264);
     }
 
     public ScreenEncoder(int bitrate, int fps, int maxSize, boolean glRepackEnabled) {
-        this(bitrate, fps, maxSize, glRepackEnabled, true);
+        this(bitrate, fps, maxSize, glRepackEnabled, MODE_COLOR_YCOCG, 0.35, ENH_H264);
     }
 
     public ScreenEncoder(int bitrate, int fps, int maxSize, boolean glRepackEnabled,
-                         boolean ycocgEnabled) {
+                         int formatMode, double baseShare) {
+        this(bitrate, fps, maxSize, glRepackEnabled, formatMode, baseShare, ENH_H264);
+    }
+
+    public ScreenEncoder(int bitrate, int fps, int maxSize, boolean glRepackEnabled,
+                         int formatMode, double baseShare, int enhImpl) {
         this.bitrate = bitrate;
         this.fps = fps;
         this.maxSize = maxSize;
         this.glRepackEnabled = glRepackEnabled;
-        this.ycocgEnabled = ycocgEnabled;
+        this.formatMode = formatMode;
+        this.baseShare = baseShare;
+        this.enhImpl = enhImpl;
     }
+
+    private boolean singleGeom() { return (formatMode & MODE_GEOM_SINGLE) != 0; }
+    private boolean layered() { return (formatMode & MODE_LAYERED) != 0; }
+    private boolean ycocg() { return !singleGeom() && (formatMode & MODE_COLOR_YCOCG) != 0; }
 
     public int getVideoWidth() {
         return videoWidth;
@@ -170,6 +220,8 @@ public final class ScreenEncoder {
         codecThread = new HandlerThread("codec-cb");
         codecThread.start();
         codecHandler = new Handler(codecThread.getLooper());
+        enhThread = new Thread(this::enhLoop, "enhancer");
+        enhThread.start();
         thread = new Thread(this::encodeLoop, "screen-encoder");
         thread.start();
     }
@@ -183,6 +235,15 @@ public final class ScreenEncoder {
                 Thread.currentThread().interrupt();
             }
         }
+        if (enhThread != null) {
+            enhThread.interrupt();
+            try {
+                enhThread.join(2000);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            enhThread = null;
+        }
         if (imageThread != null) {
             imageThread.quitSafely();
             imageThread = null;
@@ -193,6 +254,16 @@ public final class ScreenEncoder {
             codecThread = null;
             codecHandler = null;
         }
+    }
+
+    /** SET_FORMAT（协议 §5 命令 0x06）：切换视频格式模式。任意线程可调用。
+     *  只置挂起标志，编码线程在下个监督节拍 recreate（新流以 IDR 开始）。 */
+    public void setFormat(int mode) {
+        if (mode != formatMode) pendingFormat = mode;
+    }
+
+    public int getFormatMode() {
+        return formatMode;
     }
 
     /** REQ_KEYFRAME：请求编码器立即出一个 IDR。任意线程可调用。 */
@@ -215,11 +286,18 @@ public final class ScreenEncoder {
     }
 
     /** video_capacity_callback → 调整编码码率；变化 >15% 才下发。任意线程可调用。
-     *  --bitrate 是硬上限：只能降不能超（链路好也不加码，码率预算是应用语义）。 */
+     *  --bitrate 是硬上限（只降不超）；layer 模式下基础层只占 baseShare，
+     *  剩余带宽预算留给增强层（ch 4）。 */
     public synchronized void setBitrate(long bps) {
         MediaCodec c = codec;
         if (c == null || bps <= 0) return;
-        if (bps > bitrate) bps = bitrate;  // 硬上限 = 配置值
+        lastCapacityBps = bps;  // 增强层逐帧字节预算依据
+        // 增强编码器拿剩余份额（capacity × (1−baseShare)）
+        EnhEncoder enh = enhEncoder;
+        if (enh != null) enh.setBitrate((long) (bps * (1.0 - baseShare)));
+        if (layered()) bps = (long)(bps * baseShare);
+        long hardCap = layered() ? Math.max(100_000L, (long)(bitrate * baseShare)) : bitrate;
+        if (bps > hardCap) bps = hardCap;
         long cur = currentBitrate;
         if (Math.abs(bps - cur) * 100 <= cur * 15) return;
         try {
@@ -249,12 +327,18 @@ public final class ScreenEncoder {
                 if (img.getWidth() != videoWidth || img.getHeight() != videoHeight) return;
                 ByteBuffer dst = freeBufs.poll();
                 if (dst == null) return; // 编码侧消费不过来，丢帧保低时延
-                if (dst.capacity() < videoWidth * 2 * videoHeight * 3 / 2) {
+                if (dst.capacity() < frameBytes) {
                     freeBufs.offer(dst);
                     return;  // 缓冲是旧尺寸的，丢帧等重建分配新缓冲
                 }
                 long t0 = System.nanoTime();
-                Repack.repack(img, videoWidth, videoHeight, dst, ycocgEnabled);
+                if (singleGeom()) {
+                    // 协议 §3.3 single 几何：BT.601 I420（W×H，编码帧=逻辑帧）
+                    Repack.repackSingle(img, videoWidth, videoHeight, dst);
+                } else {
+                    // 协议 §3.1/§3.2 double 几何：双 YUV420 左右拼接（2W×H）
+                    Repack.repack(img, videoWidth, videoHeight, dst, ycocg());
+                }
                 long dt = System.nanoTime() - t0;
                 // 帧出生时刻用 SurfaceFlinger 的合成时间戳（nanoTime 基准），
                 // 端到端时延分析用：onEncodedFrame 里 now-pts = 采集→编码完成时延
@@ -265,7 +349,9 @@ public final class ScreenEncoder {
                 if (repackCount % REPACK_STATS_INTERVAL == 0) {
                     System.out.println("[ScreenEncoder] cpu repack avg "
                             + (repackNanosTotal / repackCount / 1000) / 1000.0 + "ms over "
-                            + repackCount + " frames, fed=" + fedFrames + " dropped=" + droppedFrames);
+                            + repackCount + " frames, fed=" + fedFrames + " dropped=" + droppedFrames
+                            + " baseDecOut=" + baseDecOut + " enhComputed=" + enhComputed
+                            + " enhSent=" + enhSent);
                 }
                 offerPending(dst, ptsUs);
             }
@@ -349,6 +435,28 @@ public final class ScreenEncoder {
 
     private final CodecCallback codecCallback = new CodecCallback(this);
 
+    /** layer 模式：把喂入编码器的原始 I420 帧按 pts 留底（残差 = orig − recon 用）。 */
+    private void keepOrigCopy(ByteBuffer frame, long ptsUs) {
+        synchronized (origLock) {
+            ByteBuffer buf = origFree.poll();
+            if (buf == null) {
+                // 环形满：挤掉最旧（其增强多半已算完或永远等不到——挤出即放弃）
+                Long oldest = origOrder.poll();
+                if (oldest == null) return;
+                buf = origByPts.remove(oldest);
+                if (buf == null) return;
+            }
+            ByteBuffer src = frame.duplicate();
+            src.clear();
+            src.limit(frameBytes);
+            buf.clear();
+            buf.put(src);
+            buf.flip();
+            origByPts.put(ptsUs, buf);
+            origOrder.add(ptsUs);
+        }
+    }
+
     /** pending 槽有新帧或有空闲输入缓冲时调用：条件满足就把最新帧喂给编码器。 */
     private void tryFeed() {
         ByteBuffer frame;
@@ -372,6 +480,7 @@ public final class ScreenEncoder {
                     Repack.fillInputImage(frame, encWidth, encHeight, input);
                     c.queueInputBuffer(index, 0, frameBytes, ptsUs, 0);
                     fedFrames++;
+                    if (layered()) keepOrigCopy(frame, ptsUs);
                 } else {
                     droppedFrames++;
                     synchronized (frameLock) { if (inFlight > 0) inFlight--; }
@@ -413,6 +522,17 @@ public final class ScreenEncoder {
                         recreate();
                     }
                 }
+                // SET_FORMAT 格式切换（client 命令 0x06）：重建编码器+采集链，
+                // 新流以 IDR + 新 flags 开始，client 逐帧自描述切换渲染路径
+                if (pendingFormat >= 0 && pendingFormat != formatMode) {
+                    int m = pendingFormat;
+                    pendingFormat = -1;
+                    formatMode = m;
+                    System.out.println("[ScreenEncoder] format switch -> " + m
+                            + " (single=" + singleGeom() + " ycocg=" + ycocg()
+                            + " layered=" + layered() + ")");
+                    recreate();
+                }
                 // 关键帧请求超时未出 IDR（编码器忽略同步帧请求/静态画面不产出）
                 // → 整体重建编码器，新编码器首帧必为 IDR
                 if (keyframeReq) {
@@ -423,14 +543,11 @@ public final class ScreenEncoder {
                         recreate();
                     }
                 }
-                // 编码器卡死自愈：有喂入但 >2s 无输出 → 重建
-                if (fedFrames != lastFedSeen) {
-                    lastFedSeen = fedFrames;
-                    lastFedChangeAt = now;
-                }
-                if (lastFedChangeAt > 0 && now - lastFedChangeAt < 5000
-                        && lastOutputAt > 0 && now - lastOutputAt > 2000) {
-                    System.out.println("[ScreenEncoder] encoder stalled (fed but no output >2s), recreating");
+                // 编码器卡死自愈：喂入多于输出（在途帧真卡住）且 >2s 无输出 → 重建。
+                // 注意 fed==out 的静止画面不是卡死——旧条件（lastFedChangeAt<5s）在
+                // 静止期误判，而每次重建又产 IDR 重置窗口 → 静止屏每 ~2.4s 重建死循环
+                if (lastOutputAt > 0 && fedFrames != outFrames && now - lastOutputAt > 2000) {
+                    System.out.println("[ScreenEncoder] encoder stalled (fed > out, no output >2s), recreating");
                     recreate();
                     lastFedChangeAt = 0;
                 }
@@ -479,13 +596,23 @@ public final class ScreenEncoder {
                     + ((info.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) + ")");
         }
 
+        // layer 模式：AU 留底（编码输出缓冲回调返回即释放，须先拷贝）
+        byte[] au = null;
+        if (layered()) {
+            au = new byte[info.size];
+            ByteBuffer d = buf.duplicate();
+            d.position(info.offset);
+            d.limit(info.offset + info.size);
+            d.get(au);
+        }
+
         int head = 10;  // tag(1) + flags(1) + pts(8)
         int csdLen = (isIdr && csd0 != null && csd1 != null) ? csd0.length + csd1.length : 0;
         byte[] packet = new byte[head + csdLen + info.size];
         ByteBuffer out = ByteBuffer.wrap(packet).order(ByteOrder.BIG_ENDIAN);
         out.put((byte) 0x56);  // 'V'：避开 tight 内部保留首字节 0x01/0x02/0x03
-        // flags：bit0=IDR；bit1=YCoCg 打包（协议 §3.2，逐帧自描述）
-        out.put((byte) ((isIdr ? 1 : 0) | (ycocgEnabled ? 0x02 : 0)));
+        // flags：bit0=IDR；bit1=YCoCg 打包（§3.2）；bit2=single 几何（§3.3），逐帧自描述
+        out.put((byte) ((isIdr ? 1 : 0) | (ycocg() ? 0x02 : 0) | (singleGeom() ? 0x04 : 0)));
         out.putLong(ptsMs);
         if (csdLen > 0) {
             out.put(csd0);
@@ -510,7 +637,10 @@ public final class ScreenEncoder {
                 }
             }
         }
-        TightBridge.nativeSendVideo(packet, isIdr);
+        boolean sent = TightBridge.nativeSendVideo(packet, isIdr);
+        // layer 模式：闭环解码实际发出的基础层码流（丢帧不喂——client 也没收到，
+        // 两侧解码器在下一 IDR 重新对齐，期间的增强帧 client 侧本就在门控丢弃）
+        if (sent && layered() && au != null) feedBaseDecoder(au, info.presentationTimeUs, isIdr);
 
         // 编码器内部排队时延仪器（每 100 帧打一次）：pts 是重排完成时刻
         // （queueInputBuffer 时写入），与输出时刻之差 = 帧在 MediaCodec
@@ -521,6 +651,226 @@ public final class ScreenEncoder {
                     + "ms (out=" + outFrames + ")");
         }
         outFrames++;
+    }
+
+    // ---- layer 模式：基础层闭环解码 → 残差增强（协议 §3.4）----
+
+    // D8 对匿名类/非静态内部类有内部 NPE bug：回调类一律 static 具名嵌套
+    private static final class BaseDecListener implements BaseDecoder.Listener {
+        private final ScreenEncoder owner;
+
+        BaseDecListener(ScreenEncoder owner) {
+            this.owner = owner;
+        }
+
+        @Override
+        public void onOutput(Image img, long ptsUs, int cropL, int cropT,
+                             int cropW, int cropH) {
+            owner.onBaseRecon(img, ptsUs, cropL, cropT, cropW, cropH);
+        }
+
+        @Override
+        public void onOverflow() {
+            owner.onBaseDecoderOverflow();
+        }
+    }
+
+    /** 把实际发出的 AU 喂给闭环解码器（首次调用时用编码器 CSD 惰性创建）。 */
+    private void feedBaseDecoder(byte[] au, long ptsUs, boolean isIdr) {
+        if (csd0 == null || csd1 == null) return;  // 尚无 CSD，等 FORMAT_CHANGED
+        BaseDecoder d = baseDecoder;
+        if (d == null) {
+            try {
+                d = new BaseDecoder(encWidth, encHeight, csd0, csd1, new BaseDecListener(this));
+            } catch (Throwable t) {
+                System.out.println("[ScreenEncoder] BaseDecoder create failed: " + t);
+                return;
+            }
+            baseDecoder = d;
+        }
+        d.feed(au, ptsUs);
+        if (isIdr) enhResync = false;  // IDR 喂入 → 两侧重建链自该帧对齐
+    }
+
+    /** BaseDecoder 输入溢出：参考链断裂直到下一 IDR——抑制增强 + 请求关键帧对齐。 */
+    private void onBaseDecoderOverflow() {
+        enhResync = true;
+        requestKeyframe();
+        EnhEncoder e = enhEncoder;
+        if (e != null) e.requestKeyframe();  // 增强链同步对齐
+    }
+
+    /** 0x07 REQ_ENH_KEYFRAME（协议 §5）：增强层断链恢复。任意线程。 */
+    public void requestEnhKeyframe() {
+        EnhEncoder e = enhEncoder;
+        if (e != null) e.requestKeyframe();
+    }
+
+    // D8 对匿名类/非静态内部类有内部 NPE bug：回调类一律 static 具名嵌套
+    private static final class EnhMsgListener implements EnhEncoder.Listener {
+        private final ScreenEncoder owner;
+
+        EnhMsgListener(ScreenEncoder owner) {
+            this.owner = owner;
+        }
+
+        @Override
+        public void onEnhMessage(byte[] packet, boolean isIdr) {
+            owner.onEnhMessage(packet, isIdr);
+        }
+    }
+
+    /** 增强编码器输出（ch 4 完整消息）：积压时先丢增强（基础层优先）；IDR 不丢。 */
+    private void onEnhMessage(byte[] packet, boolean isIdr) {
+        if (!isIdr) {
+            long[] s = TightBridge.nativeStats();
+            if (s != null && s[1] > 0) {
+                long limit = Math.max(32L * 1300L, s[1] / 20);  // ~50ms 积压
+                if (s[3] * 1300L > limit) {
+                    droppedFrames++;
+                    return;
+                }
+            }
+        }
+        TightBridge.nativeSendChannel(packet, 4);
+        enhSent++;
+    }
+
+    /** 解码回调线程：把重建帧可视区（crop）拷进环形缓冲并排队增强任务（~2ms）。 */
+    private void onBaseRecon(Image img, long ptsUs, int cropL, int cropT,
+                             int cropW, int cropH) {
+        baseDecOut++;
+        if (!layered() || enhResync) return;
+        if (cropW != encWidth || cropH != encHeight) return;  // 尺寸/裁剪不符（recreate 竞态）
+        ByteBuffer buf = reconFree.poll();
+        if (buf == null) return;  // 增强线程跟不上：丢该帧增强（解码链完整，安全）
+        Image.Plane[] planes = img.getPlanes();
+        if (planes.length < 3 || buf.capacity() < frameBytes) {
+            if (buf.capacity() >= frameBytes) reconFree.offer(buf);
+            return;
+        }
+        Layered.nativeCopyPlanes(
+                sliceOff(planes[0].getBuffer(),
+                        cropT * planes[0].getRowStride() + cropL * planes[0].getPixelStride()),
+                planes[0].getRowStride(), planes[0].getPixelStride(),
+                sliceOff(planes[1].getBuffer(),
+                        cropT / 2 * planes[1].getRowStride()
+                                + cropL / 2 * planes[1].getPixelStride()),
+                planes[1].getRowStride(), planes[1].getPixelStride(),
+                sliceOff(planes[2].getBuffer(),
+                        cropT / 2 * planes[2].getRowStride()
+                                + cropL / 2 * planes[2].getPixelStride()),
+                planes[2].getRowStride(), planes[2].getPixelStride(),
+                slice0(buf), encWidth, encHeight);
+        EnhTask t = new EnhTask();
+        t.recon = buf;
+        t.ptsUs = ptsUs;
+        if (!enhQueue.offer(t)) reconFree.offer(buf);  // 队列满丢该帧增强
+    }
+
+    /** 增强工作线程：残差计算 + 熵编码 + ch 4 发送（不阻塞编码/解码线程）。 */
+    private void enhLoop() {
+        while (running) {
+            EnhTask t;
+            try {
+                t = enhQueue.poll(200, java.util.concurrent.TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                continue;
+            }
+            if (t == null) continue;
+            try {
+                if (running) processEnhancement(t);
+            } catch (Exception e) {
+                System.out.println("[ScreenEncoder] enhancer error: " + e);
+            } finally {
+                t.recon.clear();
+                reconFree.offer(t.recon);
+            }
+        }
+    }
+
+    private void processEnhancement(EnhTask t) {
+        if (!layered() || enhResync) return;
+        // 出站积压：增强层先于基础层丢（阈值约为基础 P 帧的一半）
+        long[] s = TightBridge.nativeStats();
+        if (s != null && s[1] > 0) {
+            long limit = Math.max(32L * 1300L, s[1] / 20);  // ~50ms 积压
+            if (s[3] * 1300L > limit) {
+                droppedFrames++;
+                return;
+            }
+        }
+        ByteBuffer orig;
+        synchronized (origLock) {
+            orig = origByPts.remove(t.ptsUs);
+            if (orig != null) origOrder.remove(t.ptsUs);
+        }
+        if (orig == null) return;  // 原始帧已被环形挤出
+        try {
+            if (orig.capacity() < frameBytes) return;  // recreate 竞态的旧尺寸残留
+            int cw = encWidth / 2, ch = encHeight / 2;
+            int ySize = encWidth * encHeight, cSize = cw * ch;
+            if (enhImpl == ENH_RICE) {
+                // v1 对照路径：Rice 无损熵编码（协议 §3.4 kind=0x01）
+                // 逐帧字节预算：剩余带宽份额折算，钳制 [16KB, 512KB]
+                long cap = lastCapacityBps > 0 ? lastCapacityBps : bitrate;
+                long budget = (long) (cap * (1.0 - baseShare)) / Math.max(1, fps) / 8;
+                long maxBytes = Math.max(16 * 1024, Math.min(512 * 1024, budget));
+                byte[] payload = Layered.nativeComputeEnhancement(
+                        sliceAt(orig, 0, frameBytes), encWidth, encHeight,
+                        sliceAt(t.recon, 0, ySize), encWidth, 1,
+                        sliceAt(t.recon, ySize, cSize), cw, 1,
+                        sliceAt(t.recon, ySize + cSize, cSize), cw, 1, maxBytes);
+                if (payload == null) return;  // 尺寸护栏：该帧增强弃发
+                byte[] packet = new byte[9 + payload.length];
+                ByteBuffer out = ByteBuffer.wrap(packet).order(ByteOrder.BIG_ENDIAN);
+                out.put((byte) 0x57);  // 增强层 tag（协议 §3.4）
+                out.putLong(t.ptsUs / 1000);
+                out.put(payload);
+                TightBridge.nativeSendChannel(packet, 4);
+            } else {
+                // v2 默认路径：直偏置 sym 帧送增强编码器硬编（协议 §3.4 kind=0x02；
+                // 实验证明差分伪装不可行，见 docs/layer_test_report.md）
+                EnhEncoder e = enhEncoder;
+                if (e == null) return;
+                byte[] sym = Layered.nativeComputeSym(
+                        sliceAt(orig, 0, frameBytes), encWidth, encHeight,
+                        sliceAt(t.recon, 0, ySize), encWidth, 1,
+                        sliceAt(t.recon, ySize, cSize), cw, 1,
+                        sliceAt(t.recon, ySize + cSize, cSize), cw, 1);
+                if (sym == null) return;
+                enhComputed++;
+                e.feed(sym, t.ptsUs);
+            }
+        } finally {
+            synchronized (origLock) {
+                orig.clear();
+                origFree.offer(orig);
+            }
+        }
+    }
+
+    private static ByteBuffer slice0(ByteBuffer buf) {
+        ByteBuffer d = buf.duplicate();
+        d.position(0);
+        return d.slice();
+    }
+
+    /** 从 buffer 数据起点偏移 off 字节处切片（容量 = 剩余，JNI 侧做容量防御）。 */
+    private static ByteBuffer sliceOff(ByteBuffer buf, int off) {
+        ByteBuffer d = buf.duplicate();
+        d.position(0);
+        d.limit(d.capacity());
+        if (off < 0 || off > d.capacity()) off = 0;
+        d.position(off);
+        return d.slice();
+    }
+
+    private static ByteBuffer sliceAt(ByteBuffer buf, int off, int len) {
+        ByteBuffer d = buf.duplicate();
+        d.position(off);
+        d.limit(off + len);
+        return d.slice();
     }
 
     private void cacheConfigData(MediaFormat format) {
@@ -542,7 +892,7 @@ public final class ScreenEncoder {
     }
 
     /** 扫描 Annex-B 字节流是否包含 IDR NAL（type 5）。从当前 position 相对读取。 */
-    private static boolean containsIdr(ByteBuffer buf, int size) {
+    static boolean containsIdr(ByteBuffer buf, int size) {
         int run = 0; // 连续 0 字节计数（起始码前缀检测）
         for (int i = 0; i < size; i++) {
             byte b = buf.get();
@@ -574,14 +924,16 @@ public final class ScreenEncoder {
         int[] size = computeVideoSize(d.width, d.height);
         videoWidth = size[0];
         videoHeight = size[1];
-        encWidth = videoWidth * 2;   // 双 YUV420 左右拼接（协议 §3.1）
+        encWidth = singleGeom() ? videoWidth : videoWidth * 2;  // 协议 §3.3 / §3.1
         encHeight = videoHeight;
         frameBytes = encWidth * encHeight * 3 / 2;
 
         MediaFormat format = MediaFormat.createVideoFormat(MIME, encWidth, encHeight);
         format.setInteger(MediaFormat.KEY_COLOR_FORMAT,
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible);
-        format.setInteger(MediaFormat.KEY_BIT_RATE, bitrate);
+        // layer 模式基础层只占 baseShare，余量留给增强层（ch 4）
+        int initBitrate = layered() ? Math.max(100_000, (int) (bitrate * baseShare)) : bitrate;
+        format.setInteger(MediaFormat.KEY_BIT_RATE, initBitrate);
         format.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
         format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, I_FRAME_INTERVAL_S);
         format.setInteger("latency", 0);   // KEY_LATENCY
@@ -593,7 +945,7 @@ public final class ScreenEncoder {
         // setCallback 显式挂 codec-cb 线程，回调不占用编码线程
         codec.setCallback(codecCallback, codecHandler);
         codec.start();
-        currentBitrate = bitrate;
+        currentBitrate = initBitrate;
         csd0 = null;
         csd1 = null;
         inFlight = 0;
@@ -601,10 +953,10 @@ public final class ScreenEncoder {
             freeInputs.clear();
         }
 
-        // 采集 target：默认 GL 重排（SurfaceTexture，帧不出 GPU）；失败回退
-        // ImageReader + CPU native 重排
+        // 采集 target：double 几何默认 GL 重排（SurfaceTexture，帧不出 GPU）；
+        // single 几何只走 CPU（GL 重排仅实现双打包）；失败回退 ImageReader+CPU
         Surface target;
-        if (glRepackEnabled) {
+        if (glRepackEnabled && !singleGeom()) {
             try {
                 glRepack = GlRepack.create(videoWidth, videoHeight, glSink);
                 System.out.println("[ScreenEncoder] using GL repack path");
@@ -633,6 +985,37 @@ public final class ScreenEncoder {
             pendingFrame = null;
         }
 
+        // layer 模式：orig 留底环形 + recon 拷贝环形（增强工作线程在 start() 常驻）
+        synchronized (origLock) {
+            origByPts.clear();
+            origOrder.clear();
+            origFree.clear();
+            if (layered()) {
+                for (int i = 0; i < ORIG_RING; ++i)
+                    origFree.offer(ByteBuffer.allocateDirect(frameBytes));
+            }
+        }
+        reconFree.clear();
+        if (layered()) {
+            for (int i = 0; i < 3; ++i) reconFree.offer(ByteBuffer.allocateDirect(frameBytes));
+        }
+        // 清空滞留增强任务（其 recon/orig 缓冲随环形重建一并废弃）
+        EnhTask t;
+        while ((t = enhQueue.poll()) != null) { /* 废弃 */ }
+        enhResync = false;
+
+        // layer + H.264 增强：创建增强编码器（码率 = 剩余份额；尺寸随 recreate 变化）
+        if (layered() && enhImpl == ENH_H264 && enhEncoder == null) {
+            try {
+                enhEncoder = new EnhEncoder(encWidth, encHeight, fps,
+                        Math.max(100_000, (int) (bitrate * (1.0 - baseShare))),
+                        new EnhMsgListener(this));
+            } catch (Throwable t2) {
+                System.out.println("[ScreenEncoder] EnhEncoder create failed: " + t2);
+                enhEncoder = null;
+            }
+        }
+
         display = SurfaceControl.createDisplay("tightcast", false);
         Rect contentRect = new Rect(0, 0, d.width, d.height);
         Rect videoRect = new Rect(0, 0, videoWidth, videoHeight);
@@ -646,9 +1029,19 @@ public final class ScreenEncoder {
         }
         lastRotationCheck = System.currentTimeMillis();
         lastIdrAt = lastRotationCheck;  // 新编码器首帧必为 IDR
+        lastOutputAt = lastRotationCheck;  // 卡死自愈的启动宽限（首帧输出前不计时）
     }
 
     private synchronized void teardown() {
+        // layer 模式：闭环解码器/增强编码器随编码器一并重建（CSD/尺寸可能已变）
+        if (baseDecoder != null) {
+            baseDecoder.shutdown();
+            baseDecoder = null;
+        }
+        if (enhEncoder != null) {
+            enhEncoder.shutdown();
+            enhEncoder = null;
+        }
         // 先摘回调再关 reader，避免回调线程读到已失效的尺寸/编码器状态
         if (imageReader != null) {
             imageReader.setOnImageAvailableListener(null, null);
