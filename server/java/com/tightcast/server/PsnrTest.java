@@ -74,6 +74,9 @@ public final class PsnrTest {
         rc |= encodeOne(singleI420, W, H, 5_000_000, new File(dir, "single_5M.h264"));
         rc |= encodeOne(singleI420, W, H, 12_000_000, new File(dir, "single_12M.h264"));
         rc |= encodeOne(singleI420, W, H, 40_000_000, new File(dir, "single_40M.h264"));
+        rc |= encodeOne(singleI420, W, H, 30_000_000, new File(dir, "single_30M.h264"));
+        rc |= encodeOne(singleI420, W, H, 24_000_000, new File(dir, "single_24M.h264"));
+        rc |= encodeOne(singleI420, W, H, 100_000_000, new File(dir, "single_100M.h264"));
         rc |= encodeOne(dualI420, W * 2, H, 6_000_000, new File(dir, "dual_6M.h264"));
         rc |= encodeOne(dualI420, W * 2, H, 9_000_000, new File(dir, "dual_9M.h264"));
         rc |= encodeOne(dualI420, W * 2, H, 12_000_000, new File(dir, "dual_12M.h264"));
@@ -87,6 +90,9 @@ public final class PsnrTest {
         rc |= encodeOne(dualYcocg, W * 2, H, 12_000_000, new File(dir, "dual_ycocg_12M.h264"));
         rc |= encodeOne(dualYcocg, W * 2, H, 20_000_000, new File(dir, "dual_ycocg_20M.h264"));
         rc |= encodeOne(dualYcocg, W * 2, H, 40_000_000, new File(dir, "dual_ycocg_40M.h264"));
+        rc |= encodeOne(dualYcocg, W * 2, H, 30_000_000, new File(dir, "dual_ycocg_30M.h264"));
+        rc |= encodeOne(dualYcocg, W * 2, H, 24_000_000, new File(dir, "dual_ycocg_24M.h264"));
+        rc |= encodeOne(dualYcocg, W * 2, H, 100_000_000, new File(dir, "dual_ycocg_100M.h264"));
         System.out.println("[PsnrTest] " + (rc == 0 ? "ALL DONE" : "FAILED rc=" + rc));
         return rc;
     }
