@@ -1032,7 +1032,20 @@ public final class ScreenEncoder {
         lastOutputAt = lastRotationCheck;  // 卡死自愈的启动宽限（首帧输出前不计时）
     }
 
-    private synchronized void teardown() {
+    private void teardown() {
+        MediaCodec codecToStop;
+        synchronized (this) {
+            // 锁序铁律：先摘引用，监控器外 stop/release——持 ScreenEncoder 监视器
+            // 调 codec.stop() 会与"回调线程 onOutputBufferAvailable →
+            // synchronized(owner)"互锁（stop 等回调返回、回调等监视器）——
+            // SET_FORMAT 切换卡死（vok 冻结）的实测根因
+            codecToStop = codec;
+            codec = null;
+            synchronized (frameLock) {
+                freeInputs.clear();
+                inFlight = 0;
+            }
+        }
         // layer 模式：闭环解码器/增强编码器随编码器一并重建（CSD/尺寸可能已变）
         if (baseDecoder != null) {
             baseDecoder.shutdown();
@@ -1057,17 +1070,17 @@ public final class ScreenEncoder {
             glRepack.release();
             glRepack = null;
         }
-        if (codec != null) {
+        if (codecToStop != null) {
+            // 监控器外 stop/release（锁序见上）
             try {
-                codec.setCallback(null);  // 先摘回调，防 stop 期间回调打进来
+                codecToStop.setCallback(null);  // 先摘回调，防 stop 期间回调打进来
             } catch (Exception ignored) {}
             try {
-                codec.stop();
+                codecToStop.stop();
             } catch (Exception ignored) {}
             try {
-                codec.release();
+                codecToStop.release();
             } catch (Exception ignored) {}
-            codec = null;
         }
         synchronized (frameLock) {
             freeInputs.clear();

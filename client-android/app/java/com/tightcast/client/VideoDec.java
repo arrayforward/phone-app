@@ -250,6 +250,7 @@ public final class VideoDec {
         }
         if (sps == null || pps == null || dims == null) {
             lastError = "no sps/pps or parse failed";
+            Log2File.log("[VideoDec] layer" + layer + " " + lastError);
             return false;
         }
         MediaCodec existing;

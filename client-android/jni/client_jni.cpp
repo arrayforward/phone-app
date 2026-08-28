@@ -198,15 +198,17 @@ Java_com_tightcast_client_NativeClient_nativeVideoSize(JNIEnv* env, jclass) {
     return arr;
 }
 
-// 上屏统计行（UI 状态条）：shown/composited/enh_idr/got_idr + 解码器最近状态
+// 上屏统计行（UI 状态条）：shown/composited/enh_idr/got_idr/jank‰/grace + 解码器状态
 JNIEXPORT jstring JNICALL
 Java_com_tightcast_client_NativeClient_nativeStatsLine(JNIEnv* env, jclass) {
-    std::uint64_t s[3];
+    std::uint64_t s[5];
     Client::instance().stats(s);
     std::string line = "shown=" + std::to_string(s[0])
             + " composited=" + std::to_string(s[1])
             + " enh_idr=" + std::to_string(s[2])
             + " idr=" + std::to_string(Client::instance().got_idr() ? 1 : 0)
+            + " jank=" + std::to_string(s[3] / 10) + "." + std::to_string(s[3] % 10) + "%"
+            + " grace=" + std::to_string(s[4]) + "ms"
             + " " + g_dec_status;
     return env->NewStringUTF(line.c_str());
 }

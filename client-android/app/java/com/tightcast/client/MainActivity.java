@@ -249,6 +249,10 @@ public final class MainActivity extends Activity {
                 for (int i = 0; i < MODE_VALUES.length; ++i) {
                     if (MODE_VALUES[i] == mode) {
                         modeSpinner.setSelection(i);
+                        // 显式测试参数优先于持久化值，并写回持久化（避免
+                        // 上线沿的持久化下发把显式参数覆盖掉——实测曾因此
+                        // 被 layer 回盖导致双模式黑屏 51s）
+                        getPreferences(MODE_PRIVATE).edit().putInt("mode_pos", i).apply();
                         break;
                     }
                 }

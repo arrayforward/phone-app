@@ -189,6 +189,8 @@ void Client::on_message(tight::Bytes payload) {
         if (m_transport) m_transport->request_keyframe();
     }
     m_last_fed_pts.store(pts_ms);
+    m_last_base_arrival_ms.store(duration_cast<std::chrono::milliseconds>(
+            steady_clock::now().time_since_epoch()).count());  // 卡顿判定用
     note_base_arrival(pts_ms);  // grace P50 自适应：基础层到达时刻
     if (idr && !m_got_idr.exchange(true)) CLOG("[gate] idr -> open");
 }
@@ -271,9 +273,11 @@ void Client::decode_loop() {
             // Java MediaCodec 路径（华为等 NDK AImageReader 不通的机型）
             int flags = (item.idr ? 1 : 0) | (item.ycocg ? 0x02 : 0) | (item.single ? 0x04 : 0);
             if (!m_java_dec[0].feed(item.au.data(), item.au.size(), item.pts_ms, flags)) {
-                // 解码器忙/未就绪：丢帧 → 基础层断链门控 + 请求关键帧
-                if (!item.idr && m_got_idr.exchange(false)) {
-                    CLOG("[gate] java-dec-busy -> CLOSED");
+                // 解码器忙/未就绪/配置失败：丢帧 → 基础层断链门控 + 请求关键帧
+                // （IDR 喂失败也要兜：否则格式切换后解码器配置失败会永久黑屏——
+                //  双击断流 51s 的实测根因）
+                if (m_got_idr.exchange(false)) {
+                    CLOG("[gate] java-dec-busy -> CLOSED (idr=%d)", (int)item.idr);
                     clear_residuals("base-java-busy");
                     if (m_transport) m_transport->request_keyframe();
                 }
@@ -353,7 +357,69 @@ void Client::DisplayScheduler::tick_loop() {
 // ---- 增强层配对（§3.4 上屏语义）----
 // 基础帧上屏时刻：同 pts 残差已就绪 → 挂到帧上由 shader 合成；
 // 未就绪 → 立即上屏低码率基础帧（不为等增强层引入额外延迟）。
+// ---- 卡顿率统计 ----
+// 卡顿事件 = 动态惯性（间隔 > 前 3 帧均值 × 2）∧ 绝对感知（间隔 > 84ms），
+// 且间隔期间有基础帧到达（排除画面静止）。卡顿率 = Σ 卡顿耗时 / 总时长 × 100%。
+void Client::note_show() {
+    std::int64_t now = duration_cast<std::chrono::milliseconds>(
+            steady_clock::now().time_since_epoch()).count();
+    std::lock_guard<std::mutex> lk(m_jank_mtx);
+    if (m_first_show_ms == 0) {
+        m_first_show_ms = now;
+        m_jank_window_start_ms = now;
+        m_last_show_ms = now;
+        return;  // 首帧无间隔
+    }
+    std::int64_t gap = now - m_last_show_ms;
+    m_last_show_ms = now;
+    if (gap <= 0) return;
+
+    m_gaps_ms.push_back(gap);
+    if (m_gaps_ms.size() > 300) m_gaps_ms.pop_front();
+    ++m_win_shown;
+    m_win_gap_ms += gap;
+
+    // 动态惯性条件：当前间隔 > 前 3 帧平均的 2 倍
+    bool inertia = false;
+    if (!m_last3_gaps.empty()) {
+        std::int64_t sum = 0;
+        for (auto g : m_last3_gaps) sum += g;
+        inertia = gap > 2 * (sum / (std::int64_t)m_last3_gaps.size());
+    }
+    bool absolute = gap > 84;  // 绝对感知条件
+    bool fed = m_last_base_arrival_ms.load() > m_last_show_ms - gap;  // 期间有帧到达
+    if (inertia && absolute && fed) {
+        ++m_win_jank;
+        m_win_jank_ms += gap;      // 单次卡顿耗时 = 该次卡顿帧的上屏间隔
+        m_cum_jank_ms += gap;
+    }
+    m_last3_gaps.push_back(gap);
+    if (m_last3_gaps.size() > 3) m_last3_gaps.pop_front();
+
+    if (now - m_jank_window_start_ms >= 10000) {
+        if (!m_gaps_ms.empty()) {
+            std::vector<std::int64_t> sorted(m_gaps_ms.begin(), m_gaps_ms.end());
+            std::sort(sorted.begin(), sorted.end());
+            m_gap_p50_ms = sorted[sorted.size() / 2];
+        }
+        // 窗口卡顿率 = Σ 卡顿耗时 / 窗口上屏总时长；累计 = Σ / （首帧至今）
+        int win_rate = m_win_gap_ms > 0 ? (int)(m_win_jank_ms * 1000 / m_win_gap_ms) : 0;
+        m_jank_rate_x1000 = win_rate;
+        std::int64_t cum_span = now - m_first_show_ms;
+        int cum_rate = cum_span > 0 ? (int)(m_cum_jank_ms * 1000 / cum_span) : 0;
+        CLOG("[jank] stutter=%d.%d%% events=%d jank_ms=%lld/%lld gap_p50=%lldms cum=%d.%d%%",
+             win_rate / 10, win_rate % 10, m_win_jank,
+             (long long)m_win_jank_ms, (long long)m_win_gap_ms,
+             (long long)m_gap_p50_ms, cum_rate / 10, cum_rate % 10);
+        m_win_shown = m_win_jank = 0;
+        m_win_jank_ms = 0;
+        m_win_gap_ms = 0;
+        m_jank_window_start_ms = now;
+    }
+}
+
 void Client::attach_residual(VideoFrame& f) {
+    note_show();  // 卡顿率统计（上屏唯一出口）
     std::lock_guard<std::mutex> lk(m_resid_mtx);
     m_last_display_pts.store(f.pts_ms);
     ++m_shown_total;

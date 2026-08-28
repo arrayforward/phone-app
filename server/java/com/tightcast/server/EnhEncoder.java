@@ -239,9 +239,13 @@ public final class EnhEncoder {
     }
 
     /** 重建编码器（codec 线程内）：尺寸/码率不变，首帧必为 IDR + 新 CSD。 */
-    private synchronized void recreateOnThread() {
-        MediaCodec c = codec;
-        codec = null;
+    private void recreateOnThread() {
+        MediaCodec c;
+        synchronized (this) {
+            c = codec;
+            codec = null;
+        }
+        // 监控外 stop/release（同 shutdown 注释的锁序）
         if (c != null) {
             try {
                 c.setCallback(null);
@@ -310,15 +314,21 @@ public final class EnhEncoder {
         return arr;
     }
 
-    public synchronized void shutdown() {
-        MediaCodec c = codec;
-        codec = null;
+    public void shutdown() {
+        MediaCodec c;
+        synchronized (this) {
+            c = codec;
+            codec = null;
+        }
         synchronized (frameLock) {
             pendingFrame = null;
             symFree.clear();
             freeInputs.clear();
             inFlight = 0;
         }
+        // 锁序铁律：监控外 stop/release——持 EnhEncoder 监视器调 codec.stop()
+        // 会与"回调线程 onOutputBufferAvailable → tryFeed 取 synchronized(this)"
+        // 互锁（stop 等回调返回，回调等监视器）——SET_FORMAT 切换卡死的实测根因
         if (c != null) {
             try {
                 c.setCallback(null);

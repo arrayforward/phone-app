@@ -32,11 +32,14 @@ public:
     bool online() const;
     bool got_idr() const { return m_got_idr.load(); }
     Renderer& renderer() { return m_renderer; }
-    // 上屏统计（UI 状态条）：out 返回 [shown_total, shown_with_residual, enh_idr]
-    void stats(std::uint64_t out[3]) {
+    // 上屏统计（UI 状态条）：out 返回 [shown_total, shown_with_residual, enh_idr,
+    //                              jank_rate_‰, grace_ms]
+    void stats(std::uint64_t out[5]) {
         out[0] = m_shown_total.load();
         out[1] = m_shown_with_res.load();
         out[2] = m_enh_got_idr.load() ? 1 : 0;
+        out[3] = (std::uint64_t)m_jank_rate_x1000.load();
+        out[4] = (std::uint64_t)m_grace_cur.load();
     }
 
     // ---- 输入（Java 线程）----
@@ -231,6 +234,26 @@ private:
     std::atomic<int> m_grace_cur{150};
     void note_base_arrival(std::uint64_t pts_ms);
     void note_enh_arrival(std::uint64_t pts_ms);
+
+    // ---- 卡顿率统计（attach_residual 是上屏唯一出口）----
+    // 卡顿事件（两条件同时满足）：动态惯性——上屏间隔 > 前 3 帧平均间隔的 2 倍；
+    // 绝对感知——间隔 > 84ms（低于 24fps 的流畅度下限）。
+    // 排除画面静止：间隔期间须有基础帧到达才算管线卡顿（静止期无新帧产生）。
+    // 卡顿率 = Σ 单次卡顿耗时（卡顿帧的上屏间隔）/ 测试总时长 × 100%。
+    std::mutex m_jank_mtx;
+    std::deque<std::int64_t> m_gaps_ms;         // 上屏间隔滑窗（cap 300，P50 参考）
+    std::deque<std::int64_t> m_last3_gaps;      // 前 3 帧间隔（动态惯性判据）
+    std::int64_t m_last_show_ms = 0;
+    std::int64_t m_first_show_ms = 0;
+    std::int64_t m_gap_p50_ms = 33;             // 滚动 P50（仅参考显示）
+    std::int64_t m_jank_window_start_ms = 0;
+    std::int64_t m_win_gap_ms = 0;              // 窗口内上屏间隔总和（窗口时长）
+    int m_win_shown = 0, m_win_jank = 0;
+    std::int64_t m_win_jank_ms = 0;             // 窗口内卡顿耗时合计
+    std::int64_t m_cum_jank_ms = 0;             // 累计卡顿耗时
+    std::atomic<int> m_jank_rate_x1000{0};      // 最近窗口卡顿率 ‰（UI 显示）
+    std::atomic<std::int64_t> m_last_base_arrival_ms{0};
+    void note_show();                            // 上屏时调用（attach_residual 内）
     void request_enh_keyframe();
     void store_residual(std::uint64_t pts_ms, std::vector<std::uint8_t> y,
                         std::vector<std::uint8_t> uv);
