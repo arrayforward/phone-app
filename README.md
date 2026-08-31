@@ -10,6 +10,7 @@
 | 文档 | 内容 |
 |---|---|
 | [docs/ycocg_pipeline.md](docs/ycocg_pipeline.md) | **YCoCg 双 YUV420 打包管线设计**（4:4:4 over 4:2:0，配图） |
+| [docs/double_ycocg_bandwidth_report.md](docs/double_ycocg_bandwidth_report.md) | **业务汇报：为什么加码率必须加在 double-ycocg 上**（YUV420 vs YCoCg 26 档 RD 对比，面向华为） |
 | [docs/test_report.md](docs/test_report.md) | **测试报告**（PSNR 对比 / 稳定性 / 延迟实测） |
 | [docs/protocol.md](docs/protocol.md) | 两端线上协议规范（消息格式/通道/tight 配置；含 §3.4 layer 分层） |
 | [docs/android_client_plan.md](docs/android_client_plan.md) | **Android 客户端 + 三模式（single/double/layer）方案**（已落地联调） |
